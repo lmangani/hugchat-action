@@ -55,7 +55,7 @@ Go to your repository **Settings** → **Secrets and variables** → **Actions**
 
 1. Go to [HuggingFace Chat Assistants](https://huggingface.co/chat/assistants)
 2. Create or select your assistant
-3. Copy the ID from the URL: `https://huggingface.co/chat/assistants/{ASSISTANTID}`
+3. Copy the ID from the URL: `https://huggingface.co/chat/assistants/{HUGCHAT_ASSISTANTID}`
 4. Add it as `HUGCHAT_ASSISTANTID` secret
 
 ## 📖 How It Works
