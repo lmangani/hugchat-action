@@ -1,0 +1,489 @@
+name: 'HugChat Issue Bot'
+description: 'Automatically respond to GitHub issues using HuggingFace HugChat with persistent conversation memory'
+author: 'lmangani'
+
+branding:
+  icon: 'message-circle'
+  color: 'blue'
+
+inputs:
+  hugchat-email:
+    description: 'HuggingFace email address'
+    required: true
+  hugchat-password:
+    description: 'HuggingFace password'
+    required: true
+  hugchat-assistant-id:
+    description: 'HuggingFace Assistant ID (defaults to general assistant)'
+    required: false
+    default: ''
+  github-token:
+    description: 'GitHub token for accessing issues'
+    required: true
+    default: ${{ github.token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install hugchat
+
+    - name: Create HugChat CLI script
+      shell: bash
+      run: |
+        mkdir -p cookies
+        cat > hugchat_cli.py << 'EOL'
+        #!/usr/bin/env python3
+        
+        import argparse
+        import os
+        import sys
+        import re
+        from hugchat import hugchat
+        from hugchat.login import Login
+        
+        def setup_argparse():
+            parser = argparse.ArgumentParser(description='Interact with HugChat from command line')
+            parser.add_argument('prompt', help='The prompt to send to HugChat')
+            parser.add_argument('--email', help='HuggingFace email', 
+                              default=os.environ.get('HUGCHAT_EMAIL'))
+            parser.add_argument('--password', help='HuggingFace password',
+                              default=os.environ.get('HUGCHAT_PASSWORD'))
+            parser.add_argument('--cookie-dir', help='Cookie directory path',
+                              default='./cookies/')
+            parser.add_argument('--assistant-id', help='Assistant ID',
+                              default=os.environ.get('HUGCHAT_ASSISTANTID'))
+            parser.add_argument('--web-search', action='store_true',
+                              help='Enable web search')
+            parser.add_argument('--conversation-id', help='Existing conversation ID to continue',
+                              default=None)
+            parser.add_argument('--create-new', action='store_true',
+                              help='Force create a new conversation')
+            return parser
+        
+        def login_to_hugchat(email, password, cookie_dir):
+            if not email or not password:
+                print("Error: Email and password are required. Set them via arguments or environment variables "
+                      "HUGCHAT_EMAIL and HUGCHAT_PASSWORD", file=sys.stderr)
+                sys.exit(1)
+        
+            try:
+                print(f"Attempting to login with email: {email[:3]}***", file=sys.stderr)
+                os.makedirs(cookie_dir, exist_ok=True)
+                
+                sign = Login(email, password)
+                
+                try:
+                    cookies = sign.login(cookie_dir_path=cookie_dir, save_cookies=True)
+                    print("Login successful with password", file=sys.stderr)
+                    return cookies.get_dict()
+                except Exception as password_error:
+                    print(f"Password login failed: {password_error}", file=sys.stderr)
+                    
+                    if len(password) > 20 and password.startswith(('hf_', 'token')):
+                        print("Attempting login with access token method...", file=sys.stderr)
+                        try:
+                            sign = Login(email, None)
+                            sign.token = password
+                            cookies = sign.login(cookie_dir_path=cookie_dir, save_cookies=True)
+                            print("Login successful with token", file=sys.stderr)
+                            return cookies.get_dict()
+                        except Exception as token_error:
+                            print(f"Token login also failed: {token_error}", file=sys.stderr)
+                    
+                    raise password_error
+                    
+            except Exception as e:
+                print(f"Error logging in: {str(e)}", file=sys.stderr)
+                print("", file=sys.stderr)
+                print("TROUBLESHOOTING TIPS:", file=sys.stderr)
+                print("1. Make sure HUGCHAT_PASSWORD is your actual HuggingFace password, NOT an access token", file=sys.stderr)
+                print("2. Try logging into https://huggingface.co/chat manually to verify credentials", file=sys.stderr)
+                print("3. Check if your account has 2FA enabled (may cause issues)", file=sys.stderr)
+                print("4. Ensure your account has access to HugChat", file=sys.stderr)
+                sys.exit(1)
+        
+        def manage_conversation(chatbot, conversation_id, assistant_id, create_new):
+            """Manage conversation - either create new or switch to existing"""
+            try:
+                if create_new or not conversation_id:
+                    print("Creating new conversation...", file=sys.stderr)
+                    chatbot.new_conversation(assistant=assistant_id, switch_to=True)
+                    
+                    # Get the new conversation ID
+                    current_conv = chatbot.get_conversation_info()
+                    new_conv_id = current_conv.id
+                    print(f"Created new conversation with ID: {new_conv_id}", file=sys.stderr)
+                    return new_conv_id
+                else:
+                    print(f"Attempting to switch to existing conversation: {conversation_id}", file=sys.stderr)
+                    
+                    # First, let's get all conversations to verify the ID exists
+                    print("Fetching conversations...", file=sys.stderr)
+                    conversations = chatbot.get_remote_conversations(replace_conversation_list=True)
+                    
+                    # Only show counts and success/failure - don't leak IDs unless there's an error
+                    print(f"Found {len(conversations)} total conversations", file=sys.stderr)
+                    found_target = False
+                    for conv in conversations:
+                        if conv.id == conversation_id:
+                            found_target = True
+                            print(f"✓ Found target conversation in account", file=sys.stderr)
+                            break
+                    
+                    if not found_target:
+                        print(f"⚠️  Target conversation not found in {len(conversations)} available conversations", file=sys.stderr)
+                        print(f"Looking for conversation ID: {conversation_id}", file=sys.stderr)
+                        print("This may indicate the conversation was deleted or is inaccessible", file=sys.stderr)
+                        print("Creating new conversation instead...", file=sys.stderr)
+                        chatbot.new_conversation(assistant=assistant_id, switch_to=True)
+                        current_conv = chatbot.get_conversation_info()
+                        new_conv_id = current_conv.id
+                        print(f"Created new conversation with ID: {new_conv_id}", file=sys.stderr)
+                        return new_conv_id
+                    
+                    try:
+                        # Try to switch to the conversation
+                        # Fix: Some hugchat versions need the conversation object, not just the ID
+                        target_conversation = None
+                        for conv in conversations:
+                            if conv.id == conversation_id:
+                                target_conversation = conv
+                                break
+                        
+                        if target_conversation:
+                            print(f"Switching using conversation object instead of ID", file=sys.stderr)
+                            chatbot.change_conversation(target_conversation)
+                        else:
+                            # Fallback to ID-based switching
+                            chatbot.change_conversation(conversation_id)
+                        
+                        # Give it a moment to load (API might need time)
+                        import time
+                        time.sleep(1)
+                        
+                        # Force refresh the conversation data
+                        try:
+                            # Some versions might need to explicitly load conversation history
+                            if hasattr(chatbot, 'load_conversation'):
+                                chatbot.load_conversation(conversation_id)
+                                print("Explicitly loaded conversation history", file=sys.stderr)
+                        except Exception as load_error:
+                            print(f"Could not explicitly load conversation: {load_error}", file=sys.stderr)
+                        
+                        # Verify we actually switched by checking current conversation
+                        current_conv = chatbot.get_conversation_info()
+                        if current_conv.id == conversation_id:
+                            print(f"✓ Successfully switched to conversation: {conversation_id}", file=sys.stderr)
+                            print(f"  Current conversation model: {current_conv.model}", file=sys.stderr)
+                            
+                            # Show conversation history count only (not content)
+                            if hasattr(current_conv, 'history') and current_conv.history:
+                                print(f"  Conversation has {len(current_conv.history)} messages in history", file=sys.stderr)
+                            else:
+                                print(f"  ⚠️  No conversation history found!", file=sys.stderr)
+                            
+                            return conversation_id
+                        else:
+                            print(f"⚠️  Failed to switch - current ID is {current_conv.id}, expected {conversation_id}", file=sys.stderr)
+                            raise Exception(f"Conversation switch verification failed")
+                            
+                    except Exception as switch_error:
+                        print(f"Failed to switch to conversation {conversation_id}: {switch_error}", file=sys.stderr)
+                        print("Creating new conversation instead...", file=sys.stderr)
+                        chatbot.new_conversation(assistant=assistant_id, switch_to=True)
+                        current_conv = chatbot.get_conversation_info()
+                        new_conv_id = current_conv.id
+                        print(f"Created new conversation with ID: {new_conv_id}", file=sys.stderr)
+                        return new_conv_id
+                        
+            except Exception as e:
+                print(f"Error managing conversation: {e}", file=sys.stderr)
+                print("Falling back to new conversation", file=sys.stderr)
+                chatbot.new_conversation(assistant=assistant_id, switch_to=True)
+                current_conv = chatbot.get_conversation_info()
+                return current_conv.id
+        
+        def main():
+            parser = setup_argparse()
+            args = parser.parse_args()
+        
+            print(f"Starting HugChat CLI with prompt: {args.prompt[:50]}...", file=sys.stderr)
+        
+            cookies = login_to_hugchat(args.email, args.password, args.cookie_dir)
+        
+            try:
+                print("Creating chatbot...", file=sys.stderr)
+                chatbot = hugchat.ChatBot(cookies=cookies)
+                
+                # Manage conversation (create new or switch to existing)
+                conversation_id = manage_conversation(chatbot, args.conversation_id, args.assistant_id, args.create_new)
+                
+                # Additional verification: Since conversation switching is working, 
+                # let's trust HugChat's internal context and just verify we're in the right conversation
+                if args.conversation_id and not args.create_new:
+                    try:
+                        print("Verifying conversation context...", file=sys.stderr)
+                        current_conv = chatbot.get_conversation_info()
+                        
+                        if current_conv.id == args.conversation_id:
+                            print("✓ Successfully maintaining conversation context!", file=sys.stderr)
+                            if hasattr(current_conv, 'history') and current_conv.history:
+                                print(f"✓ Conversation has {len(current_conv.history)} messages in history", file=sys.stderr)
+                        else:
+                            print("⚠️  Conversation ID mismatch - context may be lost", file=sys.stderr)
+                            
+                    except Exception as context_error:
+                        print(f"Could not verify conversation: {context_error}", file=sys.stderr)
+                
+                print("Sending message to HugChat...", file=sys.stderr)
+                
+                # Debug: Verify conversation before sending (without showing content)
+                try:
+                    current_conv_before = chatbot.get_conversation_info()
+                    print(f"Sending message in conversation: {current_conv_before.id}", file=sys.stderr)
+                    if hasattr(current_conv_before, 'history') and current_conv_before.history:
+                        print(f"Conversation has {len(current_conv_before.history)} messages before sending", file=sys.stderr)
+                except Exception as debug_error:
+                    print(f"Could not get conversation info before sending: {debug_error}", file=sys.stderr)
+                
+                message_result = chatbot.chat(args.prompt, web_search=args.web_search)
+                response = message_result.wait_until_done()
+                
+                # Debug: Check conversation after sending (without showing content)
+                try:
+                    current_conv_after = chatbot.get_conversation_info()
+                    print(f"After sending, conversation: {current_conv_after.id}", file=sys.stderr)
+                    if hasattr(current_conv_after, 'history') and current_conv_after.history:
+                        print(f"Conversation now has {len(current_conv_after.history)} messages", file=sys.stderr)
+                except Exception as debug_error:
+                    print(f"Could not get conversation info after sending: {debug_error}", file=sys.stderr)
+                
+                # Output the response and conversation ID
+                print(f"{response}")
+                print(f"\n---\n*HugChat Session ID: `{conversation_id}`*")
+        
+            except Exception as e:
+                print(f"Error during chat: {str(e)}", file=sys.stderr)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+                sys.exit(1)
+        
+        if __name__ == "__main__":
+            main()
+        EOL
+        chmod +x hugchat_cli.py
+
+    - name: Create HugChat cleanup script
+      shell: bash
+      run: |
+        cat > cleanup_hugchat.py << 'EOL'
+        #!/usr/bin/env python3
+        
+        import argparse
+        import os
+        import sys
+        import re
+        from hugchat import hugchat
+        from hugchat.login import Login
+        
+        def login_to_hugchat(email, password):
+            if not email or not password:
+                print("Error: Email and password are required", file=sys.stderr)
+                sys.exit(1)
+        
+            try:
+                print(f"Logging in with email: {email[:3]}***", file=sys.stderr)
+                os.makedirs('./cookies/', exist_ok=True)
+                sign = Login(email, password)
+                cookies = sign.login(cookie_dir_path='./cookies/', save_cookies=True)
+                return cookies.get_dict()
+            except Exception as e:
+                print(f"Login failed: {e}", file=sys.stderr)
+                sys.exit(1)
+        
+        def cleanup_conversation(conversation_id):
+            email = os.environ.get('HUGCHAT_EMAIL')
+            password = os.environ.get('HUGCHAT_PASSWORD')
+            
+            cookies = login_to_hugchat(email, password)
+            
+            try:
+                chatbot = hugchat.ChatBot(cookies=cookies)
+                conversations = chatbot.get_remote_conversations(replace_conversation_list=True)
+                
+                print(f"Looking for conversation {conversation_id} to delete...", file=sys.stderr)
+                
+                for conv in conversations:
+                    if conv.id == conversation_id:
+                        print(f"Found conversation, attempting deletion...", file=sys.stderr)
+                        try:
+                            chatbot.delete_conversation(conv)
+                            print(f"✓ Successfully deleted conversation {conversation_id}", file=sys.stderr)
+                            return True
+                        except Exception as delete_error:
+                            print(f"Failed to delete conversation: {delete_error}", file=sys.stderr)
+                            return False
+                
+                print(f"Conversation {conversation_id} not found (may already be deleted)", file=sys.stderr)
+                return True  # Consider this success since the goal is achieved
+                
+            except Exception as e:
+                print(f"Error during cleanup: {e}", file=sys.stderr)
+                return False
+        
+        if __name__ == "__main__":
+            parser = argparse.ArgumentParser(description='Cleanup HugChat conversation')
+            parser.add_argument('conversation_id', help='Conversation ID to delete')
+            args = parser.parse_args()
+            
+            success = cleanup_conversation(args.conversation_id)
+            sys.exit(0 if success else 1)
+        EOL
+        chmod +x cleanup_hugchat.py
+
+    - name: Handle issue response or cleanup
+      shell: bash
+      env:
+        HUGCHAT_EMAIL: ${{ inputs.hugchat-email }}
+        HUGCHAT_PASSWORD: ${{ inputs.hugchat-password }}
+        HUGCHAT_ASSISTANTID: ${{ inputs.hugchat-assistant-id }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        ISSUE_TITLE: ${{ github.event.issue.title }}
+        ISSUE_BODY: ${{ github.event.comment.body || github.event.issue.body }}
+      run: |
+        # Check if this is a cleanup action (issue closed/deleted)
+        if [[ "${{ github.event.action }}" == "closed" || "${{ github.event.action }}" == "deleted" ]]; then
+          echo "Issue closed/deleted: #${{ github.event.issue.number }}"
+          echo "Looking for HugChat conversation to cleanup..."
+          
+          # Get all comments for this issue and look for HugChat Session ID
+          COMMENTS=$(gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments --jq '.[].body' || echo "")
+          
+          # Also check the issue body itself
+          ALL_CONTENT="$COMMENTS$ISSUE_BODY"
+          
+          # Extract the HugChat Session ID
+          if echo "$ALL_CONTENT" | grep -q "HugChat Session ID:"; then
+            CONVERSATION_ID=$(echo "$ALL_CONTENT" | grep "HugChat Session ID:" | tail -1 | sed -n 's/.*HugChat Session ID: `\([^`]*\)`.*/\1/p')
+            
+            if [ ! -z "$CONVERSATION_ID" ]; then
+              echo "Found HugChat conversation to cleanup: $CONVERSATION_ID"
+              
+              if python cleanup_hugchat.py "$CONVERSATION_ID"; then
+                echo "✓ Successfully cleaned up HugChat conversation"
+              else
+                echo "⚠️  Failed to cleanup HugChat conversation"
+              fi
+            else
+              echo "Could not extract conversation ID from comments"
+            fi
+          else
+            echo "No HugChat session found for this issue - nothing to cleanup"
+          fi
+          
+        else
+          # Handle normal issue response
+          echo "Checking environment variables..."
+          if [ -z "$HUGCHAT_EMAIL" ]; then
+            echo "Error: hugchat-email input is required"
+            exit 1
+          fi
+          if [ -z "$HUGCHAT_PASSWORD" ]; then
+            echo "Error: hugchat-password input is required"
+            exit 1
+          fi
+          if [ -z "$HUGCHAT_ASSISTANTID" ]; then
+            echo "Warning: hugchat-assistant-id not set, using default"
+          fi
+          if [ -z "$ISSUE_TITLE" ]; then
+            echo "Error: Issue title is empty"
+            exit 1
+          fi
+          
+          echo "Email is set: ${HUGCHAT_EMAIL:0:3}***"
+          echo "Assistant ID is set: ${HUGCHAT_ASSISTANTID:-default}"
+          echo "Issue title: $ISSUE_TITLE"
+          echo "Issue body length: ${#ISSUE_BODY}"
+          
+          # Create the full prompt with title and body
+          if [ -z "$ISSUE_BODY" ] || [ "$ISSUE_BODY" = "" ]; then
+            echo "Issue body is empty, using title as the main question"
+            FULL_PROMPT="GitHub Issue: $ISSUE_TITLE"
+            IS_NEW_ISSUE=true
+          else
+            echo "Using both title and body for context"
+            FULL_PROMPT="GitHub Issue: $ISSUE_TITLE
+
+          Issue Description:
+          $ISSUE_BODY"
+            IS_NEW_ISSUE=false
+          fi
+          
+          echo "Full prompt length: ${#FULL_PROMPT}"
+          
+          # Check if this is a follow-up comment by looking for existing HugChat session ID
+          CONVERSATION_ID=""
+          if [ "$IS_NEW_ISSUE" = false ]; then
+            echo "Looking for existing HugChat session ID in issue comments..."
+            
+            # Get all comments for this issue and look for HugChat Session ID
+            COMMENTS=$(gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments --jq '.[].body')
+            
+            # Extract the last HugChat Session ID found
+            if echo "$COMMENTS" | grep -q "HugChat Session ID:"; then
+              CONVERSATION_ID=$(echo "$COMMENTS" | grep "HugChat Session ID:" | tail -1 | sed -n 's/.*HugChat Session ID: `\([^`]*\)`.*/\1/p')
+              if [ ! -z "$CONVERSATION_ID" ]; then
+                echo "Found existing HugChat session: $CONVERSATION_ID"
+              fi
+            fi
+          fi
+          
+          # Determine if we should create a new conversation
+          if [ -z "$CONVERSATION_ID" ]; then
+            echo "No existing session found, will create new conversation"
+            HUGCHAT_ARGS="--create-new"
+          else
+            echo "Continuing existing conversation: $CONVERSATION_ID"
+            HUGCHAT_ARGS="--conversation-id $CONVERSATION_ID"
+          fi
+          
+          echo "Generating response using HugChat..."
+          # Capture both stdout and stderr for debugging
+          if python hugchat_cli.py --web-search $HUGCHAT_ARGS "$FULL_PROMPT" > /tmp/hugchat_output.log 2> /tmp/hugchat_error.log; then
+            echo "HugChat response generated successfully"
+            RESPONSE=$(cat /tmp/hugchat_output.log)
+            
+            # Show debugging info from stderr
+            echo "=== HugChat Debug Information ==="
+            cat /tmp/hugchat_error.log
+            echo "=== End Debug Information ==="
+          else
+            echo "HugChat failed with exit code $?"
+            echo "Error log:"
+            cat /tmp/hugchat_error.log
+            exit 1
+          fi
+          
+          if [ -z "$RESPONSE" ]; then
+            echo "Error: Empty response from HugChat"
+            exit 1
+          fi
+          
+          echo "Response length: ${#RESPONSE}"
+          
+          COMMENT="$RESPONSE
+
+          > I am a bot powered by Hugging Face. Please verify any information provided."
+          
+          echo "Posting comment to issue..."
+          gh issue comment ${{ github.event.issue.number }} --body "$COMMENT"
+        fi
