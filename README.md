@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: HugChat Issue Bot
-        uses: lmangani/hugchat-issue-bot@v1
+        uses: lmangani/hugchat-issue-bot@v1.0.0
         with:
           hugchat-email: ${{ secrets.HUGCHAT_EMAIL }}
           hugchat-password: ${{ secrets.HUGCHAT_PASSWORD }}
@@ -100,7 +100,7 @@ Issue gets closed
 #### Custom Assistant
 ```yaml
 - name: HugChat Issue Bot
-  uses: lmangani/hugchat-issue-bot@v1
+  uses: lmangani/hugchat-issue-bot@v1.0.0
   with:
     hugchat-email: ${{ secrets.HUGCHAT_EMAIL }}
     hugchat-password: ${{ secrets.HUGCHAT_PASSWORD }}
