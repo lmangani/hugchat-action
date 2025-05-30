@@ -47,7 +47,7 @@ Go to your repository **Settings** → **Secrets and variables** → **Actions**
 |-------------|-------------|----------|
 | `HUGCHAT_EMAIL` | Your HuggingFace email address | ✅ Yes |
 | `HUGCHAT_PASSWORD` | Your HuggingFace password (not access token) | ✅ Yes |
-| `HUGCHAT_ASSISTANTID` | Your custom assistant ID from HuggingFace | ❌ Optional |
+| `HUGCHAT_ASSISTANTID` | Your custom assistant ID from HuggingFace | ✅ Yes |
 
 > **Note**: Use your actual HuggingFace **password**, not an access token.
 
