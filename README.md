@@ -13,6 +13,7 @@ A GitHub Action that automatically responds to issues using HuggingFace HugChat 
 
 ## 🚀 Quick Setup
 
+
 ### 1. Create Workflow File
 
 Create `.github/workflows/hugchat-bot.yml`:
@@ -49,7 +50,9 @@ Go to your repository **Settings** → **Secrets and variables** → **Actions**
 | `HUGCHAT_PASSWORD` | Your HuggingFace password (not access token) | ✅ Yes |
 | `HUGCHAT_ASSISTANTID` | Your custom assistant ID from HuggingFace | ✅ Yes |
 
-> **Note**: Use your actual HuggingFace **password**, not an access token.
+> [!WARNING]
+> Using a dedicated _"throw-away"_ read only HF account is highly suggested!
+
 
 ### 3. Get Your Assistant ID (Optional)
 
