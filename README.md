@@ -57,9 +57,11 @@ Go to your repository **Settings** → **Secrets and variables** → **Actions**
 ### 3. Get Your Assistant ID (Optional)
 
 1. Go to [HuggingFace Chat Assistants](https://huggingface.co/chat/assistants)
-2. Create or select your assistant
-3. Copy the ID from the URL: `https://huggingface.co/chat/assistants/{HUGCHAT_ASSISTANTID}`
-4. Add it as `HUGCHAT_ASSISTANTID` secret
+2. Create or select your new assistant
+   - Train agent for a specific purpose
+   - Add links to sites, documents, etc 
+4. Copy the ID from the URL: `https://huggingface.co/chat/assistants/{HUGCHAT_ASSISTANTID}`
+5. Add it as `HUGCHAT_ASSISTANTID` secret
 
 ## 📖 How It Works
 
@@ -144,20 +146,6 @@ The action automatically shows debug information. Look for:
 - **Privacy**: Conversation content is not logged in GitHub Actions
 - **Cleanup**: Conversations are automatically deleted when issues close
 - **Isolation**: Each repository maintains separate conversations
-
-## 📋 Requirements
-
-- HuggingFace account with HugChat access
-- Repository with Issues enabled
-- GitHub Actions enabled
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test with a real HuggingFace account
-5. Submit a pull request
 
 ## 📄 License
 
